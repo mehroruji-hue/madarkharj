@@ -183,3 +183,5 @@ textarea {
 .btn[disabled] { opacity: .5; cursor: not-allowed; }
 #chats select { min-width: 130px; }
 .cmd { direction: ltr; unicode-bidi: bidi-override; display: inline-block; }
+.opt { display: flex; align-items: center; gap: 10px; cursor: pointer; font-weight: 700; margin-bottom: 4px; }
+.opt input { width: 22px; height: 22px; min-height: 0; flex: none; accent-color: var(--primary); }

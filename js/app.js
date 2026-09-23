@@ -3,6 +3,7 @@ import { ledger, settle, weightOf, totalWeight } from './settle.js';
 import { fa, esc, money, parseMoney, uid, copy, toast } from './util.js';
 import { encodePlan, decodePlan, shareUrl, waLink, tgLink, nativeShare } from './share.js';
 import { tgStore, getMe, findChats, sendMessage, friendlyNetworkError } from './telegram.js';
+import { smsStore, normalizePhone, isValidPhone, smsLink, PROVIDERS, friendlySmsError } from './sms.js';
 
 const $ = (s, r = document) => r.querySelector(s);
 const main = $('#main');
@@ -24,6 +25,7 @@ function route() {
   const [name, a, b] = parts;
   if (name === 'plan' && db.get(a)) viewPlan(db.get(a), b || 'people');
   else if (name === 'tg' && db.get(a)) viewTelegram(db.get(a));
+  else if (name === 'sms' && db.get(a)) viewSms(db.get(a));
   else if (name === 'v' && a) viewShared(parts.slice(1).join('/'));
   else viewHome();
   window.scrollTo(0, 0);
@@ -116,7 +118,8 @@ function tabPeople(plan) {
     <ul class="list">${plan.people.map((p) => `
       <li><div class="row-item person">
         <span class="li-text"><b>${esc(p.name)}${p.guests ? ` <span class="tag">+${fa(p.guests)} همراه</span>` : ''}</b>
-          <span class="muted small">${p.card ? `کارت: ${fa(p.card)}` : 'شماره کارت ثبت نشده'}${p.guests ? ` · سهمش ${fa(weightOf(p))} برابره` : ''}</span></span>
+          <span class="muted small">${p.card ? `کارت: ${fa(p.card)}` : 'شماره کارت ثبت نشده'}${p.phone ? ` · ${fa(p.phone)}` : ''}${p.guests ? ` · سهمش ${fa(weightOf(p))} برابره` : ''}</span></span>
+        <button class="icon-btn" data-phone="${p.id}" title="شماره موبایل">📱</button>
         <button class="icon-btn" data-guests="${p.id}" title="مهمان همراه">👥</button>
         <button class="icon-btn" data-card="${p.id}" title="شماره کارت">💳</button>
         <button class="icon-btn" data-del="${p.id}" title="حذف">🗑️</button>
@@ -128,8 +131,20 @@ function tabPeople(plan) {
         <button class="btn primary" type="submit">افزودن</button>
       </div>
       <p class="muted small">💳 شماره کارت اختیاریه، ولی اگه واردش کنی بقیه با یه کلیک کپی‌ش می‌کنن.<br>
-      👥 اگه کسی مهمون همراه داره (مثلاً همسر یا بچه)، تعدادش رو ثبت کن تا سهمش چند برابر حساب بشه.</p>
+      👥 اگه کسی مهمون همراه داره (مثلاً همسر یا بچه)، تعدادش رو ثبت کن تا سهمش چند برابر حساب بشه.<br>
+      📱 شماره موبایل فقط برای یادآوری پیامکیه و <b>داخل لینک اشتراکی نمی‌ره</b>.</p>
     </form>`;
+  $('#tab').querySelectorAll('[data-phone]').forEach((b) => {
+    b.onclick = () => {
+      const person = plan.people.find((x) => x.id === b.dataset.phone);
+      const ans = prompt(`شماره موبایل ${person.name}: (برای یادآوری پیامکی)`, person.phone || '');
+      if (ans === null) return;
+      const phone = normalizePhone(ans);
+      if (phone && !isValidPhone(phone)) return toast('شماره درست نیست. مثل ۰۹۱۲۳۴۵۶۷۸۹ بنویس');
+      db.update(plan.id, (p) => { p.people.find((x) => x.id === person.id).phone = phone; });
+      route();
+    };
+  });
   $('#tab').querySelectorAll('[data-guests]').forEach((b) => {
     b.onclick = () => {
       const person = plan.people.find((x) => x.id === b.dataset.guests);
@@ -305,7 +320,10 @@ function tabSettle(plan, t) {
         <a class="btn grow" id="wa" href="${waLink(`${text}\n${url}`)}" target="_blank" rel="noopener">واتساپ</a>
         <a class="btn grow" href="${tgLink(url, text)}" target="_blank" rel="noopener">تلگرام</a>
       </div>
-      <a class="btn block" href="#/tg/${plan.id}">🤖 یادآوری خودکار با ربات تلگرام</a>
+      <div class="row">
+        <a class="btn grow" href="#/tg/${plan.id}">🤖 ربات تلگرام</a>
+        <a class="btn grow" href="#/sms/${plan.id}">📱 پیامک</a>
+      </div>
     </div>
     <button class="btn danger block" id="delplan">حذف این پلن</button>`;
   $('#copy').onclick = async () => toast((await copy(url)) ? 'لینک کپی شد ✓' : 'کپی نشد');
@@ -516,6 +534,118 @@ function viewTelegram(plan) {
       }
     }
     toast(`${fa(ok)} پیام فرستاده شد`);
+    if (fails.length) $('#err').innerHTML = `<div class="alert">${fails.map(esc).join('<br>')}</div>`;
+  };
+}
+
+// ---------- یادآوری با پیامک ----------
+
+// متن کوتاه پیامک: هر کاراکتر فارسی پول است، پس خلاصه و بدون حاشیه
+function smsText(plan, t, person, url) {
+  const outs = t.plan.transfers.filter((x) => x.from === person.id);
+  if (!outs.length) return `${person.name} عزیز، حساب «${plan.name}» تسویه‌ست. چیزی بدهکار نیستی.`;
+  const body = outs
+    .map((o) => {
+      const to = plan.people.find((p) => p.id === o.to);
+      return `${money(o.amount)} تومان به ${to.name}${to.card ? ` - کارت ${to.card}` : ''}`;
+    })
+    .join(' / ');
+  return `${person.name} عزیز، سهم تو از «${plan.name}»: ${body}${url ? `\n${url}` : ''}`;
+}
+
+function viewSms(plan) {
+  const t = totals(plan);
+  const url = shareUrl(plan);
+  const cfg = smsStore.get();
+  const debtors = plan.people.filter((p) => t.plan.transfers.some((x) => x.from === p.id));
+  const withPhone = debtors.filter((p) => p.phone);
+  const provider = PROVIDERS[cfg.provider] || null;
+
+  main.innerHTML = `
+    <a class="back" href="#/plan/${plan.id}/settle">→ بازگشت به تسویه</a>
+    <h2 class="page-title">📱 یادآوری با پیامک</h2>
+    ${debtors.length
+      ? `<div class="card">
+          <label class="opt"><input type="checkbox" id="withlink"> لینک تسویه هم داخل پیامک باشه</label>
+          <p class="muted small">لینک طولانیه و پیامک رو چند برابر می‌کنه. اگه فقط می‌خوای مبلغ و شماره کارت رو یادآوری کنی، تیک نزن.</p>
+        </div>
+        <h3 class="section-title">پیامک دستی (رایگان)</h3>
+        <div class="card"><p class="muted small">با زدن هر دکمه، اپِ پیامکِ خود گوشیت با متن آماده باز می‌شه و فقط کافیه «ارسال» رو بزنی. از شماره‌ی خودت می‌ره، پس بقیه راحت‌تر اعتماد می‌کنن.</p></div>
+        <ul class="list" id="manual"></ul>
+        <h3 class="section-title">ارسال خودکار با پنل پیامکی (پولی)</h3>
+        <div class="card">
+          <p class="muted small">اگه پنل پیامکی داری، اپ می‌تونه همه‌ی پیامک‌ها رو یک‌جا بفرسته. کلید API فقط روی همین دستگاه ذخیره می‌شه و داخل لینک اشتراکی نمی‌ره.</p>
+          <label>پنل</label>
+          <select id="provider">
+            <option value="">— انتخاب کن —</option>
+            ${Object.entries(PROVIDERS).map(([id, p]) => `<option value="${id}"${cfg.provider === id ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}
+          </select>
+          <div id="pfields"></div>
+          <button class="btn primary block" id="sendall" ${withPhone.length ? '' : 'disabled'}>📨 فرستادن به ${fa(withPhone.length)} نفر</button>
+          <p class="muted small">نکته: بیشتر پنل‌ها برای ارسال پیامک غیرتبلیغاتی، خط خدماتی یا متن تأییدشده می‌خوان.</p>
+        </div>`
+      : '<div class="card empty"><p>کسی بدهکار نیست 🎉</p></div>'}
+    <div id="err"></div>`;
+
+  if (!debtors.length) return;
+
+  const renderManual = () => {
+    const link = $('#withlink').checked ? url : '';
+    $('#manual').innerHTML = debtors.map((p) => {
+      const text = smsText(plan, t, p, link);
+      return `<li><div class="row-item">
+        <span class="li-text"><b>${esc(p.name)}</b>
+          <span class="muted small">${p.phone ? fa(p.phone) : 'شماره موبایلش ثبت نشده'}</span></span>
+        ${p.phone
+          ? `<a class="btn small" href="${esc(smsLink(p.phone, text))}">باز کردن پیامک</a>`
+          : `<a class="btn small" href="#/plan/${plan.id}/people">ثبت شماره</a>`}
+        <button class="icon-btn" data-copytext="${esc(text)}" title="کپی متن">📋</button>
+      </div></li>`;
+    }).join('');
+    $('#manual').querySelectorAll('[data-copytext]').forEach((b) => {
+      b.onclick = async () => toast((await copy(b.dataset.copytext)) ? 'متن کپی شد ✓' : 'کپی نشد');
+    });
+  };
+
+  const renderFields = () => {
+    const id = $('#provider').value;
+    const p = PROVIDERS[id];
+    $('#pfields').innerHTML = p
+      ? `${p.fields.map((f) => `<label>${esc(f.label)}</label>
+           <input id="f_${f.id}" ${f.ltr ? 'dir="ltr" spellcheck="false"' : ''} autocomplete="off" value="${esc(cfg.provider === id ? cfg[f.id] || '' : '')}">`).join('')}
+         <p class="muted small">${esc(p.help)}</p>`
+      : '';
+  };
+
+  $('#withlink').onchange = renderManual;
+  $('#provider').onchange = () => {
+    renderFields();
+    smsStore.set({ ...smsStore.get(), provider: $('#provider').value });
+  };
+  renderManual();
+  renderFields();
+
+  $('#sendall').onclick = async () => {
+    $('#err').innerHTML = '';
+    const id = $('#provider').value;
+    const prov = PROVIDERS[id];
+    if (!prov) return toast('اول پنل رو انتخاب کن');
+    const conf = Object.fromEntries(prov.fields.map((f) => [f.id, $(`#f_${f.id}`).value.trim()]));
+    if (!conf.key) return toast('کلید API رو وارد کن');
+    smsStore.set({ provider: id, ...conf });
+    const link = $('#withlink').checked ? url : '';
+    if (!confirm(`برای ${withPhone.length} نفر پیامک فرستاده بشه؟ این کار از اعتبار پنل تو کم می‌کنه.`)) return;
+    let ok = 0;
+    const fails = [];
+    for (const p of withPhone) {
+      try {
+        await prov.send(conf, p.phone, smsText(plan, t, p, link));
+        ok++;
+      } catch (e) {
+        fails.push(`${p.name}: ${friendlySmsError(e)}`);
+      }
+    }
+    toast(`${fa(ok)} پیامک فرستاده شد`);
     if (fails.length) $('#err').innerHTML = `<div class="alert">${fails.map(esc).join('<br>')}</div>`;
   };
 }
