@@ -20,7 +20,7 @@ function totals(plan) {
   const l = ledger(plan.people, plan.expenses, plan.payments || []);
   const total = plan.expenses.reduce((s, e) => s + e.amount, 0);
   const heads = totalWeight(plan.people);
-  return { ...l, total, heads, plan: settle(l.bal) };
+  return { ...l, total, heads, plan: settle(l.bal, { round: !!plan.round }) };
 }
 
 // ---------- مسیرها ----------
@@ -400,6 +400,10 @@ function tabSettle(plan, t) {
   const text = `${plan.name} — تسویه‌حساب\nکل خرج: ${money(t.total)} تومان، ${fa(plan.people.length)} نفر\nسهم هر نفر: ${money(t.total / t.heads)} تومان\nلینک جزئیات و سهم خودت:`;
   $('#tab').innerHTML = `
     ${receiptCard(plan, t)}
+    <div class="panel quiet">
+      <label class="switch"><input type="checkbox" id="roundamt" ${plan.round ? 'checked' : ''}> رند کردن مبالغ</label>
+      <p class="hint" id="roundhint"></p>
+    </div>
     ${balancesCard(plan, t)}
     <div class="panel">
       <h3>${icon('share')} فرستادن برای بقیه</h3>
@@ -418,6 +422,21 @@ function tabSettle(plan, t) {
       </div>
     </div>
     <button class="btn btn-danger btn-block" id="delplan">${icon('trash')} حذف این پلن</button>`;
+
+  const roundHint = () => {
+    const off = settle(t.bal, { round: false });
+    const on = settle(t.bal, { round: true });
+    const diff = on.unit > 1 ? `با رند کردن، مبالغ سرراست می‌شن ولی تا ${money(on.residual)} تومان اختلاف ایجاد می‌شه.` : 'با این اعداد، رند کردن فرقی نمی‌کنه.';
+    const pays = (p) => `${fa(p.transfers.length)} پرداخت${p.singlePayment ? '، هر نفر یک بار' : '، بعضی‌ها دو بار'}`;
+    $('#roundhint').innerHTML = plan.round
+      ? `${diff} بدون رند کردن: ${pays(off)}.`
+      : `الان مبالغ دقیقن: ${pays(off)}. ${diff}`;
+  };
+  roundHint();
+  $('#roundamt').onchange = (e) => {
+    db.update(plan.id, (p) => { p.round = e.target.checked; });
+    route();
+  };
 
   $('#copy').onclick = async () => toast((await copy(url)) ? 'لینک کپی شد ✓' : 'کپی نشد');
   $('#share').onclick = async () => {
@@ -453,8 +472,8 @@ function receiptCard(plan, t) {
       </div>`;
   }).join('');
   const note = unit > 1
-    ? `مبالغ به نزدیک‌ترین ${money(unit)} تومان رند شدن${residual >= 1 ? `، پس تا ${money(residual)} تومان اختلاف ناچیز هست.` : '.'}`
-    : '';
+    ? `مبالغ به نزدیک‌ترین ${money(unit)} تومان رند شدن، پس تا ${money(residual)} تومان اختلاف هست.`
+    : 'مبالغ دقیقن.';
   return `<section class="receipt">
       <div class="receipt-head">
         <h3 class="display">پلن پرداخت</h3>

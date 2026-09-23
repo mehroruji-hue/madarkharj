@@ -27,6 +27,7 @@ export function encodePlan(plan) {
       (e.shares || []).length === plan.people.length ? [] : (e.shares || []).map((id) => idx[id]),
     ]),
     c: (plan.payments || []).map((c) => [idx[c.from], idx[c.to], c.amount, c.note || '']),
+    r: plan.round ? 1 : 0,
   };
   return b64.enc(JSON.stringify(compact));
 }
@@ -46,7 +47,7 @@ export function decodePlan(code) {
     amount,
     note,
   }));
-  return { name: c.n, people, expenses, payments };
+  return { name: c.n, people, expenses, payments, round: !!c.r };
 }
 
 export const shareUrl = (plan) =>

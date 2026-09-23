@@ -48,7 +48,8 @@ const roundTo = (v, unit) => (unit > 1 ? Math.round(v / unit) * unit : Math.roun
  * اگر ممکن نشد: پلن حریصانه، که در آن ممکن است کسی دو بار پرداخت کند.
  * خروجی: {transfers, unit, singlePayment, residual}
  */
-export function settle(bal, { units = UNITS } = {}) {
+export function settle(bal, { units = UNITS, round = false } = {}) {
+  if (!round) units = [1]; // مبلغ دقیق، بدون رند کردن
   const entries = Object.entries(bal);
   const debtors = entries.filter(([, v]) => v < -0.5).map(([id, v]) => ({ id, amount: -v }));
   const creditors = entries.filter(([, v]) => v > 0.5).map(([id, v]) => ({ id, amount: v }));
