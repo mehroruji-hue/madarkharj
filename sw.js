@@ -1,7 +1,7 @@
-const VERSION = 'madarkharj-v3';
+const VERSION = 'madarkharj-v4';
 const SHELL = [
   './', './index.html', './css/style.css',
-  './js/app.js', './js/settle.js', './js/store.js', './js/share.js', './js/util.js', './js/telegram.js', './js/sms.js',
+  './js/app.js', './js/settle.js', './js/store.js', './js/share.js', './js/util.js', './js/telegram.js', './js/sms.js', './js/icons.js', './js/sheet.js',
   './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png',
 ];
 
