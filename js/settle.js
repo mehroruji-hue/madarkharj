@@ -1,17 +1,43 @@
 // محاسبه‌ی سهم‌ها و پیدا کردن رندترین پلن پرداخت
 
-// هر هزینه: {title, payer: personId, amount, shares: [personId...], weights?: {id: n}}
-export function balances(people, expenses) {
-  const bal = Object.fromEntries(people.map((p) => [p.id, 0]));
+// وزن هر نفر: خودش به‌علاوه‌ی مهمان‌های همراهش
+export const weightOf = (p) => 1 + Math.max(0, p.guests || 0);
+export const totalWeight = (people) => people.reduce((s, p) => s + weightOf(p), 0);
+
+/**
+ * دفتر کامل حساب‌ها.
+ * expenses: {title, payer, amount, shares: [id...]}
+ * payments: پرداخت نقدی بین دو نفر {from, to, amount}
+ * خروجی: {paid, share, cashOut, cashIn, bal}
+ */
+export function ledger(people, expenses = [], payments = []) {
+  const zero = () => Object.fromEntries(people.map((p) => [p.id, 0]));
+  const w = Object.fromEntries(people.map((p) => [p.id, weightOf(p)]));
+  const paid = zero();
+  const share = zero();
+  const cashOut = zero();
+  const cashIn = zero();
+
   for (const e of expenses) {
-    const ids = (e.shares?.length ? e.shares : people.map((p) => p.id)).filter((id) => id in bal);
-    if (!ids.length || !(e.payer in bal)) continue;
-    const totalW = ids.reduce((s, id) => s + (e.weights?.[id] ?? 1), 0) || 1;
-    bal[e.payer] += e.amount;
-    for (const id of ids) bal[id] -= (e.amount * (e.weights?.[id] ?? 1)) / totalW;
+    const ids = (e.shares?.length ? e.shares : people.map((p) => p.id)).filter((id) => id in w);
+    if (!ids.length || !(e.payer in w)) continue;
+    const tw = ids.reduce((s, id) => s + w[id], 0) || 1;
+    paid[e.payer] += e.amount;
+    for (const id of ids) share[id] += (e.amount * w[id]) / tw;
   }
-  return bal;
+  for (const c of payments) {
+    if (!(c.from in w) || !(c.to in w) || c.from === c.to) continue;
+    cashOut[c.from] += c.amount;
+    cashIn[c.to] += c.amount;
+  }
+
+  const bal = Object.fromEntries(
+    people.map((p) => [p.id, paid[p.id] - share[p.id] + cashOut[p.id] - cashIn[p.id]])
+  );
+  return { paid, share, cashOut, cashIn, bal };
 }
+
+export const balances = (people, expenses, payments) => ledger(people, expenses, payments).bal;
 
 const UNITS = [500000, 100000, 50000, 10000, 5000, 1000, 500, 100, 50, 10, 1];
 const roundTo = (v, unit) => (unit > 1 ? Math.round(v / unit) * unit : Math.round(v));

@@ -166,3 +166,11 @@ summary { cursor: pointer; color: var(--primary); font-weight: 700; }
   opacity: 0; transform: translateY(12px); transition: .2s; pointer-events: none; z-index: 50;
 }
 .toast.show { opacity: 1; transform: none; }
+
+.tag {
+  display: inline-block; font-size: .72rem; font-weight: 700;
+  background: var(--surface-2); color: var(--accent);
+  border-radius: 999px; padding: 0 8px; margin-inline-start: 4px;
+}
+.arrow { color: var(--primary); font-weight: 900; }
+#addc .row select { flex: 1; }

@@ -1,5 +1,5 @@
 import { db } from './store.js';
-import { balances, settle } from './settle.js';
+import { ledger, settle, weightOf, totalWeight } from './settle.js';
 import { fa, esc, money, parseMoney, uid, copy, toast } from './util.js';
 import { encodePlan, decodePlan, shareUrl, waLink, tgLink, nativeShare } from './share.js';
 
@@ -10,12 +10,10 @@ let deferredInstall = null;
 const nameOf = (plan, id) => plan.people.find((p) => p.id === id)?.name || '؟';
 
 function totals(plan) {
-  const bal = balances(plan.people, plan.expenses);
+  const l = ledger(plan.people, plan.expenses, plan.payments || []);
   const total = plan.expenses.reduce((s, e) => s + e.amount, 0);
-  const paid = Object.fromEntries(plan.people.map((p) => [p.id, 0]));
-  for (const e of plan.expenses) paid[e.payer] = (paid[e.payer] || 0) + e.amount;
-  const share = Object.fromEntries(plan.people.map((p) => [p.id, paid[p.id] - bal[p.id]]));
-  return { bal, total, paid, share, plan: settle(bal) };
+  const heads = totalWeight(plan.people); // نفرات به‌علاوه‌ی مهمان‌ها
+  return { ...l, total, heads, plan: settle(l.bal) };
 }
 
 // ---------- مسیرها ----------
@@ -82,14 +80,11 @@ function viewPlan(plan, tab) {
       <h2 id="title">${esc(plan.name)}</h2>
       <button class="icon-btn" id="rename" title="تغییر نام">✏️</button>
     </header>
-    <div class="sum">
-      <div><span class="muted small">کل خرج</span><b>${money(t.total)}</b></div>
-      <div><span class="muted small">نفرات</span><b>${fa(plan.people.length)}</b></div>
-      <div><span class="muted small">سهم هر نفر</span><b>${plan.people.length ? money(t.total / plan.people.length) : '—'}</b></div>
-    </div>
+    ${sumBar(plan, t)}
     <nav class="tabs">
       <a href="#/plan/${plan.id}/people" class="${tab === 'people' ? 'on' : ''}">افراد</a>
       <a href="#/plan/${plan.id}/expenses" class="${tab === 'expenses' ? 'on' : ''}">خرج‌ها</a>
+      <a href="#/plan/${plan.id}/cash" class="${tab === 'cash' ? 'on' : ''}">پرداخت‌ها</a>
       <a href="#/plan/${plan.id}/settle" class="${tab === 'settle' ? 'on' : ''}">تسویه</a>
     </nav>
     <div id="tab"></div>`;
@@ -100,15 +95,27 @@ function viewPlan(plan, tab) {
       route();
     }
   };
-  ({ people: tabPeople, expenses: tabExpenses, settle: tabSettle })[tab](plan, t);
+  const tabs = { people: tabPeople, expenses: tabExpenses, cash: tabCash, settle: tabSettle };
+  (tabs[tab] || tabPeople)(plan, t);
+}
+
+// نوار بالای صفحه: کل خرج، تعداد سهم‌ها و سهم هر نفر
+function sumBar(plan, t) {
+  const guests = t.heads - plan.people.length;
+  return `<div class="sum">
+      <div><span class="muted small">کل خرج</span><b>${money(t.total)}</b></div>
+      <div><span class="muted small">${guests ? 'نفر + همراه' : 'نفرات'}</span><b>${fa(plan.people.length)}${guests ? ` + ${fa(guests)}` : ''}</b></div>
+      <div><span class="muted small">سهم هر نفر</span><b>${t.heads ? money(t.total / t.heads) : '—'}</b></div>
+    </div>`;
 }
 
 function tabPeople(plan) {
   $('#tab').innerHTML = `
     <ul class="list">${plan.people.map((p) => `
       <li><div class="row-item person">
-        <span class="li-text"><b>${esc(p.name)}</b>
-          <span class="muted small">${p.card ? `کارت: ${fa(p.card)}` : 'شماره کارت ثبت نشده'}</span></span>
+        <span class="li-text"><b>${esc(p.name)}${p.guests ? ` <span class="tag">+${fa(p.guests)} همراه</span>` : ''}</b>
+          <span class="muted small">${p.card ? `کارت: ${fa(p.card)}` : 'شماره کارت ثبت نشده'}${p.guests ? ` · سهمش ${fa(weightOf(p))} برابره` : ''}</span></span>
+        <button class="icon-btn" data-guests="${p.id}" title="مهمان همراه">👥</button>
         <button class="icon-btn" data-card="${p.id}" title="شماره کارت">💳</button>
         <button class="icon-btn" data-del="${p.id}" title="حذف">🗑️</button>
       </div></li>`).join('')}</ul>
@@ -118,8 +125,19 @@ function tabPeople(plan) {
         <input class="grow" id="pname" placeholder="مثلاً مریم" autocomplete="off" required>
         <button class="btn primary" type="submit">افزودن</button>
       </div>
-      <p class="muted small">شماره کارت اختیاریه، ولی اگه واردش کنی بقیه می‌تونن با یه کلیک کپی‌ش کنن.</p>
+      <p class="muted small">💳 شماره کارت اختیاریه، ولی اگه واردش کنی بقیه با یه کلیک کپی‌ش می‌کنن.<br>
+      👥 اگه کسی مهمون همراه داره (مثلاً همسر یا بچه)، تعدادش رو ثبت کن تا سهمش چند برابر حساب بشه.</p>
     </form>`;
+  $('#tab').querySelectorAll('[data-guests]').forEach((b) => {
+    b.onclick = () => {
+      const person = plan.people.find((x) => x.id === b.dataset.guests);
+      const ans = prompt(`${person.name} چند نفر مهمون همراه داره؟ (۰ یعنی تنهاست)`, String(person.guests || 0));
+      if (ans === null) return;
+      const n = Math.max(0, Math.min(20, parseMoney(ans)));
+      db.update(plan.id, (p) => { p.people.find((x) => x.id === person.id).guests = n; });
+      route();
+    };
+  });
   $('#addp').onsubmit = (e) => {
     e.preventDefault();
     const name = $('#pname').value.trim();
@@ -147,6 +165,7 @@ function tabPeople(plan) {
         p.people = p.people.filter((x) => x.id !== id);
         p.expenses = p.expenses.filter((e) => e.payer !== id);
         p.expenses.forEach((e) => { e.shares = (e.shares || []).filter((s) => s !== id); });
+        p.payments = (p.payments || []).filter((c) => c.from !== id && c.to !== id);
       });
       route();
     };
@@ -207,6 +226,62 @@ function tabExpenses(plan) {
   });
 }
 
+function tabCash(plan) {
+  if (plan.people.length < 2) {
+    $('#tab').innerHTML = `<div class="card empty"><p>اول حداقل دو نفر اضافه کن.</p>
+      <a class="btn primary" href="#/plan/${plan.id}/people">رفتن به افراد</a></div>`;
+    return;
+  }
+  const list = plan.payments || [];
+  const opts = (sel) => plan.people.map((p) => `<option value="${p.id}"${p.id === sel ? ' selected' : ''}>${esc(p.name)}</option>`).join('');
+  $('#tab').innerHTML = `
+    <div class="card">
+      <h3>پرداخت نقدی بین اعضا</h3>
+      <p class="muted small">اگه کسی همون‌جا نقدی یا کارت‌به‌کارت حساب کرد، اینجا ثبتش کن تا از سهمش کم بشه. این‌ها خرج پلن نیستن، فقط جابه‌جایی پول بین دو نفرن.</p>
+    </div>
+    <ul class="list">${list.map((c, i) => `
+      <li><div class="row-item">
+        <span class="li-text"><b>${esc(nameOf(plan, c.from))} <span class="arrow">←</span> ${esc(nameOf(plan, c.to))}</b>
+          <span class="muted small">${esc(c.note || 'پرداخت نقدی')}</span></span>
+        <b class="amount">${money(c.amount)}</b>
+        <button class="icon-btn" data-del="${i}" title="حذف">🗑️</button>
+      </div></li>`).join('')}</ul>
+    <form class="card" id="addc">
+      <label>پرداخت جدید</label>
+      <div class="row">
+        <select id="cfrom">${opts(plan.people[0].id)}</select>
+        <span class="arrow">←</span>
+        <select id="cto">${opts(plan.people[1].id)}</select>
+      </div>
+      <input id="camount" inputmode="numeric" placeholder="مبلغ به تومان" required>
+      <input id="cnote" placeholder="توضیح (اختیاری)، مثلاً نقدی سر میز" autocomplete="off">
+      <button class="btn primary block" type="submit">ثبت پرداخت</button>
+    </form>`;
+  $('#camount').oninput = (e) => {
+    const v = parseMoney(e.target.value);
+    e.target.value = v ? money(v) : '';
+  };
+  $('#addc').onsubmit = (e) => {
+    e.preventDefault();
+    const from = $('#cfrom').value;
+    const to = $('#cto').value;
+    const amount = parseMoney($('#camount').value);
+    if (from === to) return toast('پرداخت‌کننده و گیرنده نمی‌تونن یکی باشن');
+    if (amount <= 0) return toast('مبلغ رو وارد کن');
+    db.update(plan.id, (p) => {
+      p.payments = p.payments || [];
+      p.payments.push({ from, to, amount, note: $('#cnote').value.trim() });
+    });
+    route();
+  };
+  $('#tab').querySelectorAll('[data-del]').forEach((b) => {
+    b.onclick = () => {
+      db.update(plan.id, (p) => p.payments.splice(Number(b.dataset.del), 1));
+      route();
+    };
+  });
+}
+
 function tabSettle(plan, t) {
   if (!plan.expenses.length) {
     $('#tab').innerHTML = `<div class="card empty"><p>هنوز خرجی ثبت نشده.</p>
@@ -248,8 +323,12 @@ function settleCards(plan, t) {
   const rows = plan.people.map((p) => {
     const b = t.bal[p.id];
     const state = Math.abs(b) < 1 ? 'تسویه' : b > 0 ? `${money(b)} طلبکار` : `${money(-b)} بدهکار`;
-    return `<li><div class="row-item"><span class="li-text"><b>${esc(p.name)}</b>
-        <span class="muted small">خرج کرده ${money(t.paid[p.id])} · سهمش ${money(t.share[p.id])}</span></span>
+    const extra = [
+      t.cashOut[p.id] ? `نقدی داد ${money(t.cashOut[p.id])}` : '',
+      t.cashIn[p.id] ? `نقدی گرفت ${money(t.cashIn[p.id])}` : '',
+    ].filter(Boolean).join(' · ');
+    return `<li><div class="row-item"><span class="li-text"><b>${esc(p.name)}${p.guests ? ` <span class="tag">+${fa(p.guests)} همراه</span>` : ''}</b>
+        <span class="muted small">خرج کرده ${money(t.paid[p.id])} · سهمش ${money(t.share[p.id])}${extra ? ` · ${extra}` : ''}</span></span>
       <span class="${Math.abs(b) < 1 ? 'muted' : b > 0 ? 'good' : 'warn'}">${state}</span></div></li>`;
   }).join('');
   return `
@@ -295,11 +374,7 @@ function viewShared(code) {
   const mine = sessionStorage.getItem(`mk.me.${code.slice(0, 24)}`);
   main.innerHTML = `
     <header class="hero"><div><h1>${esc(plan.name)}</h1><p class="muted">تسویه‌حساب دورهمی</p></div></header>
-    <div class="sum">
-      <div><span class="muted small">کل خرج</span><b>${money(t.total)}</b></div>
-      <div><span class="muted small">نفرات</span><b>${fa(plan.people.length)}</b></div>
-      <div><span class="muted small">سهم هر نفر</span><b>${money(t.total / plan.people.length)}</b></div>
-    </div>
+    ${sumBar(plan, t)}
     <div class="card">
       <h3>تو کدومی؟</h3>
       <div class="chips" id="who">${plan.people.map((p) =>
