@@ -20,7 +20,7 @@ function totals(plan) {
   const l = ledger(plan.people, plan.expenses, plan.payments || []);
   const total = plan.expenses.reduce((s, e) => s + e.amount, 0);
   const heads = totalWeight(plan.people);
-  return { ...l, total, heads, plan: settle(l.bal, { round: !!plan.round }) };
+  return { ...l, total, heads, plan: settle(l.bal, { tol: plan.tol || 0 }) };
 }
 
 // ---------- مسیرها ----------
@@ -141,6 +141,9 @@ function summaryBar(plan, t) {
       <div><span>سهم هر نفر</span><b>${t.heads ? money(t.total / t.heads) : '—'}</b></div>
     </div>`;
 }
+
+// حداکثر اختلافی که کاربر برای گرد شدن مبالغ قبول می‌کند
+const TOLS = [[0, 'بدون گرد کردن (مبلغ دقیق)'], [100, 'تا ۱۰۰ تومان'], [1000, 'تا ۱٬۰۰۰ تومان'], [5000, 'تا ۵٬۰۰۰ تومان']];
 
 const needPeople = (plan) => `<div class="panel empty">
     <span class="art">${icon('users')}</span>
@@ -401,7 +404,12 @@ function tabSettle(plan, t) {
   $('#tab').innerHTML = `
     ${receiptCard(plan, t)}
     <div class="panel quiet">
-      <label class="switch"><input type="checkbox" id="roundamt" ${plan.round ? 'checked' : ''}> رند کردن مبالغ</label>
+      <div class="field">
+        <label for="roundtol">گرد کردن مبالغ</label>
+        <select id="roundtol">
+          ${TOLS.map(([v, label]) => `<option value="${v}"${(plan.tol || 0) === v ? ' selected' : ''}>${label}</option>`).join('')}
+        </select>
+      </div>
       <p class="hint" id="roundhint"></p>
     </div>
     ${balancesCard(plan, t)}
@@ -423,18 +431,20 @@ function tabSettle(plan, t) {
     </div>
     <button class="btn btn-danger btn-block" id="delplan">${icon('trash')} حذف این پلن</button>`;
 
+  const pays = (p) => `${fa(p.transfers.length)} پرداخت${p.singlePayment ? '، هر نفر یک بار' : '، بعضی‌ها دو بار'}`;
   const roundHint = () => {
-    const off = settle(t.bal, { round: false });
-    const on = settle(t.bal, { round: true });
-    const diff = on.unit > 1 ? `با رند کردن، مبالغ سرراست می‌شن ولی تا ${money(on.residual)} تومان اختلاف ایجاد می‌شه.` : 'با این اعداد، رند کردن فرقی نمی‌کنه.';
-    const pays = (p) => `${fa(p.transfers.length)} پرداخت${p.singlePayment ? '، هر نفر یک بار' : '، بعضی‌ها دو بار'}`;
-    $('#roundhint').innerHTML = plan.round
-      ? `${diff} بدون رند کردن: ${pays(off)}.`
-      : `الان مبالغ دقیقن: ${pays(off)}. ${diff}`;
+    const now = t.plan;
+    const lines = TOLS.filter(([v]) => v !== (plan.tol || 0)).map(([v, label]) => {
+      const alt = settle(t.bal, { tol: v });
+      return `${label}: ${pays(alt)}${alt.residual >= 1 ? ` · اختلاف تا ${money(alt.residual)} تومان` : ''}`;
+    });
+    $('#roundhint').innerHTML =
+      `الان: ${pays(now)}${now.residual >= 1 ? ` · اختلاف تا ${money(now.residual)} تومان` : ' · مبلغ دقیق'}.<br>` +
+      `گزینه‌های دیگه: ${lines.join(' — ')}`;
   };
   roundHint();
-  $('#roundamt').onchange = (e) => {
-    db.update(plan.id, (p) => { p.round = e.target.checked; });
+  $('#roundtol').onchange = (e) => {
+    db.update(plan.id, (p) => { p.tol = Number(e.target.value); });
     route();
   };
 
@@ -451,7 +461,7 @@ function tabSettle(plan, t) {
 }
 
 function receiptCard(plan, t) {
-  const { transfers, singlePayment, residual, unit } = t.plan;
+  const { transfers, singlePayment, residual } = t.plan;
   if (!transfers.length) {
     return `<div class="panel empty"><span class="art">${icon('check')}</span>
       <h3>همه تسویه‌ان</h3><p class="hint">کسی به کسی بدهکار نیست.</p></div>`;
@@ -469,10 +479,11 @@ function receiptCard(plan, t) {
           <span class="leader"></span>
           ${to.card ? `<button class="btn btn-sm btn-soft" data-copy="${esc(to.card)}">${icon('copy')} کارت</button>` : ''}
         </div>
+        ${tr.exact !== tr.amount ? `<p class="hint">مبلغ دقیق: ${money(tr.exact)} تومان</p>` : ''}
       </div>`;
   }).join('');
-  const note = unit > 1
-    ? `مبالغ به نزدیک‌ترین ${money(unit)} تومان رند شدن، پس تا ${money(residual)} تومان اختلاف هست.`
+  const note = residual >= 1
+    ? `مبالغ گرد شدن؛ بیشترین اختلاف برای یک نفر ${money(residual)} تومانه.`
     : 'مبالغ دقیقن.';
   return `<section class="receipt">
       <div class="receipt-head">

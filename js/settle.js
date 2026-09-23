@@ -1,14 +1,12 @@
-// محاسبه‌ی سهم‌ها و پیدا کردن رندترین پلن پرداخت
+// محاسبه‌ی سهم‌ها و ساختن پلن پرداخت
 
-// وزن هر نفر: خودش به‌علاوه‌ی مهمان‌های همراهش
 export const weightOf = (p) => 1 + Math.max(0, p.guests || 0);
 export const totalWeight = (people) => people.reduce((s, p) => s + weightOf(p), 0);
 
 /**
- * دفتر کامل حساب‌ها.
+ * دفتر حساب.
  * expenses: {title, payer, amount, shares: [id...]}
  * payments: پرداخت نقدی بین دو نفر {from, to, amount}
- * خروجی: {paid, share, cashOut, cashIn, bal}
  */
 export function ledger(people, expenses = [], payments = []) {
   const zero = () => Object.fromEntries(people.map((p) => [p.id, 0]));
@@ -39,94 +37,94 @@ export function ledger(people, expenses = [], payments = []) {
 
 export const balances = (people, expenses, payments) => ledger(people, expenses, payments).bal;
 
-const UNITS = [500000, 100000, 50000, 10000, 5000, 1000, 500, 100, 50, 10, 1];
-const roundTo = (v, unit) => (unit > 1 ? Math.round(v / unit) * unit : Math.round(v));
+// پله‌های گردی، از گردترین به ریزترین
+const STEPS = [500000, 100000, 50000, 10000, 5000, 1000, 500, 100];
+
+/**
+ * گردترین مبلغ‌هایی که فاصله‌شان تا عدد دقیق از «tol» بیشتر نیست.
+ * مثال: ۱۹۹٬۴۰۰ با تحمل ۱۰۰۰ ← ۲۰۰٬۰۰۰ (گردتر) و ۱۹۹٬۵۰۰ و ۱۹۹٬۴۰۰
+ */
+export function niceAmounts(exact, tol) {
+  const out = new Map();
+  for (const step of STEPS) {
+    const v = Math.round(exact / step) * step;
+    if (v > 0 && Math.abs(v - exact) <= tol && !out.has(v)) out.set(v, step);
+  }
+  const plain = Math.round(exact);
+  if (!out.has(plain)) out.set(plain, 1);
+  return [...out.entries()]
+    .map(([v, step]) => ({ v, step, off: Math.abs(v - exact) }))
+    .sort((a, b) => b.step - a.step || a.off - b.off);
+}
 
 /**
  * پلن پرداخت.
- * هدف اول: هر بدهکار فقط یک بار پرداخت کند و مبالغ تا حد ممکن رند باشند.
- * اگر ممکن نشد: پلن حریصانه، که در آن ممکن است کسی دو بار پرداخت کند.
- * خروجی: {transfers, unit, singlePayment, residual}
+ * tol = حداکثر اختلافی که کاربر برای گرد شدن مبالغ قبول کرده (۰ یعنی مبلغ دقیق)
+ * خروجی: {transfers:[{from,to,amount,exact}], singlePayment, residual, tol}
  */
-export function settle(bal, { units = UNITS, round = false } = {}) {
-  if (!round) units = [1]; // مبلغ دقیق، بدون رند کردن
+export function settle(bal, { tol = 0 } = {}) {
   const entries = Object.entries(bal);
   const debtors = entries.filter(([, v]) => v < -0.5).map(([id, v]) => ({ id, amount: -v }));
   const creditors = entries.filter(([, v]) => v > 0.5).map(([id, v]) => ({ id, amount: v }));
   if (!debtors.length || !creditors.length) {
-    return { transfers: [], unit: 1, singlePayment: true, residual: 0 };
-  }
-  const smallest = Math.min(...debtors.map((d) => d.amount));
-  const totalDebt = debtors.reduce((s, d) => s + d.amount, 0);
-  // هیچ‌کس نباید به خاطر رند کردن بیشتر از یک درصدِ کل (یا یک واحد) ضرر کند
-  const acceptable = (unit) => Math.max(unit, 0.01 * totalDebt);
-
-  for (const unit of units) {
-    if (unit > smallest / 2 && unit > 1) continue; // واحدی که بدهی کوچک را صفر کند به درد نمی‌خورد
-    const plan = singlePaymentPlan(debtors, creditors, unit);
-    if (!plan) continue;
-    const residual = residualOf(plan, bal);
-    if (residual > acceptable(unit)) continue; // خیلی درشت رند شده، واحد کوچک‌تر را امتحان کن
-    return { transfers: plan, unit, singlePayment: true, residual };
+    return { transfers: [], singlePayment: true, residual: 0, tol };
   }
 
-  // اگر «هر نفر یک پرداخت» ممکن نشد: پلن حریصانه، ولی با مبالغ تا حد ممکن رند
-  const plan = greedyPlan(debtors, creditors);
-  for (const unit of units) {
-    if (unit === 1) break;
-    if (unit > Math.min(...plan.map((t) => t.amount)) / 4) continue;
-    const rounded = plan.map((t) => ({ ...t, amount: roundTo(t.amount, unit) }));
-    if (residualOf(rounded, bal) <= acceptable(unit)) {
-      return { transfers: rounded, unit, singlePayment: false, residual: residualOf(rounded, bal) };
-    }
-  }
-  return { transfers: plan, unit: 1, singlePayment: false, residual: residualOf(plan, bal) };
+  const single = singlePaymentPlan(debtors, creditors, tol);
+  if (single) return { transfers: single, singlePayment: true, residual: residualOf(single, bal), tol };
+
+  const plan = roundPlan(greedyPlan(debtors, creditors), tol, bal);
+  return { transfers: plan, singlePayment: false, residual: residualOf(plan, bal), tol };
 }
 
-// آیا می‌توان هر بدهکار را به یک طلبکار نسبت داد، طوری که با رند کردن جور دربیاید؟
-function singlePaymentPlan(debtors, creditors, unit) {
-  const ds = debtors
-    .map((d) => ({ ...d, paid: Math.max(unit, roundTo(d.amount, unit)) }))
-    .sort((a, b) => b.paid - a.paid);
+// هر بدهکار فقط یک پرداخت: هر نفر را به یک طلبکار نسبت می‌دهیم
+function singlePaymentPlan(debtors, creditors, tol) {
+  const ds = [...debtors]
+    .sort((a, b) => b.amount - a.amount)
+    .map((d) => ({ ...d, options: niceAmounts(d.amount, tol) }));
   const nc = creditors.length;
-  // بزرگ‌ترین طلبکار، باقی‌مانده‌ی رند کردن را جذب می‌کند (معمولاً خودش هم راضی است)
-  const absorber = creditors.reduce((bi, c, i, a) => (c.amount > a[bi].amount ? i : bi), 0);
   const got = new Array(nc).fill(0);
-  const cnt = new Array(nc).fill(0);
-  const assign = new Array(ds.length).fill(-1);
+  const pick = new Array(ds.length).fill(null);
   let best = null;
   let nodes = 0;
 
   const search = (i) => {
-    if (nodes++ > 200000) return;
+    if (nodes++ > 300000 || (best && best.score === 0)) return;
     if (i === ds.length) {
       let err = 0;
       for (let k = 0; k < nc; k++) {
-        // هر طلبکار حداکثر نصف واحد رند به ازای هر پرداختی که می‌گیرد اختلاف داشته باشد
-        const tol = k === absorber ? Infinity : cnt[k] * unit * 0.5 + 0.5;
         const diff = Math.abs(got[k] - creditors[k].amount);
-        if (diff > tol) return;
-        if (cnt[k] === 0) return; // طلبکاری که هیچ پرداختی نمی‌گیرد یعنی پلن ناقص است
+        if (diff > tol + 0.5) return;
         err += diff;
       }
-      if (!best || err < best.err) best = { err, assign: [...assign] };
+      // هرچه مبالغ گردتر و اختلاف کمتر، بهتر
+      const roundness = pick.reduce((s, p) => s + Math.log10(p.step), 0);
+      const score = err - roundness * 1000;
+      if (!best || score < best.score) best = { score, pick: pick.map((p) => ({ ...p })), to: [...assign] };
       return;
     }
-    for (let k = 0; k < nc; k++) {
-      if (k !== absorber && got[k] + ds[i].paid - creditors[k].amount > unit) continue; // هرس کردن
-      got[k] += ds[i].paid;
-      cnt[k]++;
-      assign[i] = k;
-      search(i + 1);
-      got[k] -= ds[i].paid;
-      cnt[k]--;
-      assign[i] = -1;
+    for (const opt of ds[i].options) {
+      for (let k = 0; k < nc; k++) {
+        if (got[k] + opt.v - creditors[k].amount > tol + 0.5) continue;
+        got[k] += opt.v;
+        pick[i] = opt;
+        assign[i] = k;
+        search(i + 1);
+        got[k] -= opt.v;
+        pick[i] = null;
+        assign[i] = -1;
+      }
     }
   };
-
+  const assign = new Array(ds.length).fill(-1);
   search(0);
   if (!best) return null;
-  return ds.map((d, i) => ({ from: d.id, to: creditors[best.assign[i]].id, amount: d.paid }));
+  return ds.map((d, i) => ({
+    from: d.id,
+    to: creditors[best.to[i]].id,
+    amount: best.pick[i].v,
+    exact: Math.round(d.amount),
+  }));
 }
 
 function greedyPlan(debtors, creditors) {
@@ -137,7 +135,7 @@ function greedyPlan(debtors, creditors) {
   let j = 0;
   while (i < ds.length && j < cs.length) {
     const amount = Math.min(ds[i].amount, cs[j].amount);
-    if (amount > 0.5) out.push({ from: ds[i].id, to: cs[j].id, amount: Math.round(amount) });
+    if (amount > 0.5) out.push({ from: ds[i].id, to: cs[j].id, amount: Math.round(amount), exact: Math.round(amount) });
     ds[i].amount -= amount;
     cs[j].amount -= amount;
     if (ds[i].amount <= 0.5) i++;
@@ -146,7 +144,21 @@ function greedyPlan(debtors, creditors) {
   return out;
 }
 
-// بیشترین اختلافی که رند کردن برای یک نفر ایجاد کرده
+/**
+ * گرد کردن پرداخت‌ها، طوری که اختلافِ هیچ‌کس از «tol» بیشتر نشود.
+ * چون ممکن است یک نفر چند پرداخت داشته باشد، بودجه‌ی گرد کردن را کم‌کم نصف می‌کنیم
+ * تا وقتی اختلاف واقعی هیچ‌کس از حد مجاز بیشتر نباشد.
+ */
+function roundPlan(transfers, tol, bal) {
+  if (tol <= 0) return transfers;
+  for (let budget = tol; budget >= 1; budget = Math.floor(budget / 2)) {
+    const cand = transfers.map((t) => ({ ...t, amount: niceAmounts(t.exact, budget)[0].v }));
+    if (residualOf(cand, bal) <= tol + 0.5) return cand;
+  }
+  return transfers;
+}
+
+// بیشترین اختلافی که گرد کردن برای یک نفر ایجاد کرده
 export function residualOf(transfers, bal) {
   const net = Object.fromEntries(Object.keys(bal).map((id) => [id, 0]));
   for (const t of transfers) {
