@@ -2,6 +2,7 @@ import { db } from './store.js';
 import { ledger, settle, weightOf, totalWeight } from './settle.js';
 import { fa, esc, money, parseMoney, uid, copy, toast } from './util.js';
 import { encodePlan, decodePlan, shareUrl, waLink, tgLink, nativeShare } from './share.js';
+import { tgStore, getMe, findChats, sendMessage, friendlyNetworkError } from './telegram.js';
 
 const $ = (s, r = document) => r.querySelector(s);
 const main = $('#main');
@@ -22,6 +23,7 @@ function route() {
   const parts = location.hash.replace(/^#\/?/, '').split('/');
   const [name, a, b] = parts;
   if (name === 'plan' && db.get(a)) viewPlan(db.get(a), b || 'people');
+  else if (name === 'tg' && db.get(a)) viewTelegram(db.get(a));
   else if (name === 'v' && a) viewShared(parts.slice(1).join('/'));
   else viewHome();
   window.scrollTo(0, 0);
@@ -303,6 +305,7 @@ function tabSettle(plan, t) {
         <a class="btn grow" id="wa" href="${waLink(`${text}\n${url}`)}" target="_blank" rel="noopener">واتساپ</a>
         <a class="btn grow" href="${tgLink(url, text)}" target="_blank" rel="noopener">تلگرام</a>
       </div>
+      <a class="btn block" href="#/tg/${plan.id}">🤖 یادآوری خودکار با ربات تلگرام</a>
     </div>
     <button class="btn danger block" id="delplan">حذف این پلن</button>`;
   $('#copy').onclick = async () => toast((await copy(url)) ? 'لینک کپی شد ✓' : 'کپی نشد');
@@ -357,6 +360,164 @@ function bindCopyCards() {
   document.querySelectorAll('[data-copy]').forEach((b) => {
     b.onclick = async () => toast((await copy(b.dataset.copy)) ? 'شماره کارت کپی شد ✓' : 'کپی نشد');
   });
+}
+
+// ---------- ربات تلگرام ----------
+
+// متن یادآوری گروهی و شخصی
+function reminderText(plan, t, url, forPerson) {
+  const line = (tr) => `• ${nameOf(plan, tr.from)} ← ${nameOf(plan, tr.to)}: ${money(tr.amount)} تومان`;
+  if (forPerson) {
+    const out = t.plan.transfers.filter((x) => x.from === forPerson.id);
+    const head = `سلام ${forPerson.name} 👋\nتسویه‌ی «${plan.name}»`;
+    if (!out.length) return `${head}\nتو تسویه‌ای، چیزی بدهکار نیستی 🎉\n${url}`;
+    const cards = out
+      .map((o) => {
+        const to = plan.people.find((p) => p.id === o.to);
+        return `${money(o.amount)} تومان به ${to.name}${to.card ? `\nشماره کارت: ${to.card}` : ''}`;
+      })
+      .join('\n');
+    return `${head}\nسهم تو: ${money(t.share[forPerson.id])} تومان\n\n${cards}\n\nجزئیات: ${url}`;
+  }
+  return [
+    `🧾 تسویه‌ی «${plan.name}»`,
+    `کل خرج: ${money(t.total)} تومان · سهم هر نفر: ${money(t.total / t.heads)} تومان`,
+    '',
+    t.plan.transfers.length ? t.plan.transfers.map(line).join('\n') : 'همه تسویه‌ان 🎉',
+    '',
+    `سهم خودت رو اینجا ببین: ${url}`,
+  ].join('\n');
+}
+
+function viewTelegram(plan) {
+  const t = totals(plan);
+  const url = shareUrl(plan);
+  const cfg = tgStore.get();
+  const chat = plan.tg?.chat;
+  main.innerHTML = `
+    <a class="back" href="#/plan/${plan.id}/settle">→ بازگشت به تسویه</a>
+    <h2 class="page-title">🤖 یادآوری با ربات تلگرام</h2>
+    <div class="card">
+      <p class="muted small">مادرخرج سرور نداره، پس با <b>ربات خودت</b> کار می‌کنه. ساختن ربات رایگانه و یک دقیقه طول می‌کشه. توکن ربات فقط روی همین گوشی ذخیره می‌شه و هیچ‌وقت داخل لینکی که برای بقیه می‌فرستی نمی‌ره.</p>
+    </div>
+
+    <div class="card">
+      <h3>قدم ۱: ساختن ربات</h3>
+      <ol class="how-ol">
+        <li>در تلگرام به <b class="cmd">@BotFather</b> پیام بده</li>
+        <li>دستور <b class="cmd">/newbot</b> رو بفرست و یه اسم و یه یوزرنیم بده</li>
+        <li>توکنی که می‌ده رو کپی کن و اینجا بذار</li>
+      </ol>
+      <div class="row">
+        <input class="grow" id="token" placeholder="۱۲۳۴۵۶:ABC..." value="${esc(cfg.token || '')}" autocomplete="off" spellcheck="false" dir="ltr">
+        <button class="btn primary" id="connect">اتصال</button>
+      </div>
+      <div id="botinfo" class="muted small">${cfg.bot ? `✅ وصل شده به <b>@${esc(cfg.bot)}</b>` : 'هنوز وصل نشده'}</div>
+    </div>
+
+    <div class="card">
+      <h3>قدم ۲: انتخاب مقصد پیام</h3>
+      <p class="muted small"><b>گروهی:</b> ربات رو به گروه دورهمی اضافه کن و در گروه <b class="cmd">/start@</b>اسم‌ربات رو بفرست.<br>
+      <b>شخصی:</b> هر کسی که می‌خوای پیام خصوصی بگیره، یه بار ربات رو باز کنه و <b class="cmd">/start</b> بزنه.<br>
+      بعد دکمه‌ی زیر رو بزن.</p>
+      <button class="btn block" id="findchats">🔄 پیدا کردن چت‌ها</button>
+      <div id="chats">${chat ? `<p class="good">مقصد فعلی: <b>${esc(chat.title)}</b></p>` : ''}</div>
+    </div>
+
+    <div class="card">
+      <h3>قدم ۳: فرستادن یادآوری</h3>
+      <label>متن پیام</label>
+      <textarea id="msg" rows="9">${esc(reminderText(plan, t, url))}</textarea>
+      <button class="btn primary block" id="send" ${chat ? '' : 'disabled'}>📨 فرستادن به ${chat ? esc(chat.title) : 'مقصد انتخاب‌شده'}</button>
+      <button class="btn block" id="sendeach" ${chat ? '' : 'disabled'}>👤 فرستادن پیام جدا برای هر بدهکار</button>
+      <p class="muted small">پیام جداگانه فقط برای کسانی می‌ره که چت خصوصیشون رو در قدم ۲ به اسمشون وصل کرده باشی.</p>
+    </div>
+    <div id="err"></div>`;
+
+  const errBox = (e) => { $('#err').innerHTML = `<div class="alert">${esc(friendlyNetworkError(e))}</div>`; };
+  const token = () => $('#token').value.trim();
+
+  $('#connect').onclick = async () => {
+    $('#err').innerHTML = '';
+    try {
+      const me = await getMe(token());
+      tgStore.set({ ...tgStore.get(), token: token(), bot: me.username });
+      $('#botinfo').innerHTML = `✅ وصل شده به <b>@${esc(me.username)}</b>`;
+      toast('ربات وصل شد ✓');
+    } catch (e) {
+      errBox(e);
+    }
+  };
+
+  $('#findchats').onclick = async () => {
+    $('#err').innerHTML = '';
+    try {
+      const chats = await findChats(token());
+      if (!chats.length) {
+        $('#chats').innerHTML = '<p class="muted small">چتی پیدا نشد. یه پیام به ربات بفرست (در گروه: <b class="cmd">/start@</b>اسم‌ربات) و دوباره امتحان کن.</p>';
+        return;
+      }
+      $('#chats').innerHTML = `<ul class="list">${chats.map((c) => `
+        <li><div class="row-item">
+          <span class="li-text"><b>${esc(c.title)}</b><span class="muted small">${c.type === 'private' ? 'چت خصوصی' : 'گروه'}</span></span>
+          <button class="btn small" data-target="${c.id}" data-title="${esc(c.title)}">مقصد اصلی</button>
+          ${c.type === 'private' ? `<select data-link="${c.id}"><option value="">— وصل به کسی نشده —</option>${plan.people.map((p) => `<option value="${p.id}"${plan.tg?.people?.[p.id] === c.id ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}</select>` : ''}
+        </div></li>`).join('')}</ul>`;
+      $('#chats').querySelectorAll('[data-target]').forEach((b) => {
+        b.onclick = () => {
+          db.update(plan.id, (p) => {
+            p.tg = { ...(p.tg || {}), chat: { id: Number(b.dataset.target), title: b.dataset.title } };
+          });
+          toast('مقصد ثبت شد ✓');
+          route();
+        };
+      });
+      $('#chats').querySelectorAll('[data-link]').forEach((sel) => {
+        sel.onchange = () => {
+          db.update(plan.id, (p) => {
+            p.tg = { ...(p.tg || {}), people: { ...(p.tg?.people || {}) } };
+            for (const [pid, cid] of Object.entries(p.tg.people)) {
+              if (cid === Number(sel.dataset.link)) delete p.tg.people[pid];
+            }
+            if (sel.value) p.tg.people[sel.value] = Number(sel.dataset.link);
+          });
+          toast('ثبت شد ✓');
+        };
+      });
+    } catch (e) {
+      errBox(e);
+    }
+  };
+
+  $('#send').onclick = async () => {
+    $('#err').innerHTML = '';
+    try {
+      await sendMessage(token(), plan.tg.chat.id, $('#msg').value);
+      toast('پیام فرستاده شد ✓');
+    } catch (e) {
+      errBox(e);
+    }
+  };
+
+  $('#sendeach').onclick = async () => {
+    $('#err').innerHTML = '';
+    const map = plan.tg?.people || {};
+    const debtors = plan.people.filter((p) => t.plan.transfers.some((x) => x.from === p.id));
+    const targets = debtors.filter((p) => map[p.id]);
+    if (!targets.length) return toast('هنوز چت خصوصی کسی وصل نشده');
+    let ok = 0;
+    const fails = [];
+    for (const p of targets) {
+      try {
+        await sendMessage(token(), map[p.id], reminderText(plan, t, url, p));
+        ok++;
+      } catch (e) {
+        fails.push(`${p.name}: ${friendlyNetworkError(e)}`);
+      }
+    }
+    toast(`${fa(ok)} پیام فرستاده شد`);
+    if (fails.length) $('#err').innerHTML = `<div class="alert">${fails.map(esc).join('<br>')}</div>`;
+  };
 }
 
 // ---------- صفحه‌ی لینک اشتراکی ----------

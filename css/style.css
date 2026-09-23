@@ -174,3 +174,12 @@ summary { cursor: pointer; color: var(--primary); font-weight: 700; }
 }
 .arrow { color: var(--primary); font-weight: 900; }
 #addc .row select { flex: 1; }
+
+textarea {
+  width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 12px;
+  background: var(--surface); color: var(--text); font: inherit; line-height: 1.8; resize: vertical;
+}
+.how-ol { line-height: 2; list-style-type: persian; }
+.btn[disabled] { opacity: .5; cursor: not-allowed; }
+#chats select { min-width: 130px; }
+.cmd { direction: ltr; unicode-bidi: bidi-override; display: inline-block; }
