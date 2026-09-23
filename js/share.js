@@ -28,6 +28,7 @@ export function encodePlan(plan) {
     ]),
     c: (plan.payments || []).map((c) => [idx[c.from], idx[c.to], c.amount, c.note || '']),
     r: plan.tol || 0,
+    w: plan.waive || 0,
   };
   return b64.enc(JSON.stringify(compact));
 }
@@ -47,7 +48,7 @@ export function decodePlan(code) {
     amount,
     note,
   }));
-  return { name: c.n, people, expenses, payments, tol: Number(c.r) || 0 };
+  return { name: c.n, people, expenses, payments, tol: Number(c.r) || 0, waive: Number(c.w) || 0 };
 }
 
 export const shareUrl = (plan) =>

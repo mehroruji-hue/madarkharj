@@ -353,3 +353,5 @@ details[open] > summary::before { content: "\2212 "; }
 }
 
 .steps li > span { flex: 1; }
+
+.waived { border-top: 1.5px dashed var(--rule); padding-top: 10px; display: flex; flex-direction: column; gap: 2px; }

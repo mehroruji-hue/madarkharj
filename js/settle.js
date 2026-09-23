@@ -62,19 +62,39 @@ export function niceAmounts(exact, tol) {
  * tol = حداکثر اختلافی که کاربر برای گرد شدن مبالغ قبول کرده (۰ یعنی مبلغ دقیق)
  * خروجی: {transfers:[{from,to,amount,exact}], singlePayment, residual, tol}
  */
-export function settle(bal, { tol = 0 } = {}) {
+export function settle(bal, { tol = 0, waive = 0 } = {}) {
   const entries = Object.entries(bal);
   const debtors = entries.filter(([, v]) => v < -0.5).map(([id, v]) => ({ id, amount: -v }));
   const creditors = entries.filter(([, v]) => v > 0.5).map(([id, v]) => ({ id, amount: v }));
   if (!debtors.length || !creditors.length) {
-    return { transfers: [], singlePayment: true, residual: 0, tol };
+    return { transfers: [], waived: [], singlePayment: true, residual: 0, tol, waive };
   }
 
   const single = singlePaymentPlan(debtors, creditors, tol);
-  if (single) return { transfers: single, singlePayment: true, residual: residualOf(single, bal), tol };
+  const plan = single || roundPlan(greedyPlan(debtors, creditors), tol, bal);
+  return finish(plan, bal, { tol, waive });
+}
 
-  const plan = roundPlan(greedyPlan(debtors, creditors), tol, bal);
-  return { transfers: plan, singlePayment: false, residual: residualOf(plan, bal), tol };
+/**
+ * بخشیدن خرده‌ها: پرداخت‌های کوچک‌تر از «waive» حذف می‌شوند و
+ * طلبکارِ همان پرداخت از آن مبلغ می‌گذرد. چه کسی از چه مبلغی گذشته، ثبت می‌شود.
+ */
+function finish(transfers, bal, { tol, waive }) {
+  let kept = transfers;
+  let waived = [];
+  if (waive > 0) {
+    waived = transfers.filter((t) => t.amount <= waive);
+    kept = transfers.filter((t) => t.amount > waive);
+  }
+  const payers = new Set(kept.map((t) => t.from));
+  return {
+    transfers: kept,
+    waived,
+    singlePayment: payers.size === kept.length,
+    residual: residualOf(kept, bal),
+    tol,
+    waive,
+  };
 }
 
 // هر بدهکار فقط یک پرداخت: هر نفر را به یک طلبکار نسبت می‌دهیم

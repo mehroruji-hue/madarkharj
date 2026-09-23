@@ -20,7 +20,7 @@ function totals(plan) {
   const l = ledger(plan.people, plan.expenses, plan.payments || []);
   const total = plan.expenses.reduce((s, e) => s + e.amount, 0);
   const heads = totalWeight(plan.people);
-  return { ...l, total, heads, plan: settle(l.bal, { tol: plan.tol || 0 }) };
+  return { ...l, total, heads, plan: settle(l.bal, { tol: plan.tol || 0, waive: plan.waive || 0 }) };
 }
 
 // ---------- مسیرها ----------
@@ -144,6 +144,9 @@ function summaryBar(plan, t) {
 
 // حداکثر اختلافی که کاربر برای گرد شدن مبالغ قبول می‌کند
 const TOLS = [[0, 'بدون گرد کردن (مبلغ دقیق)'], [100, 'تا ۱۰۰ تومان'], [1000, 'تا ۱٬۰۰۰ تومان'], [5000, 'تا ۵٬۰۰۰ تومان']];
+
+// بخشیدن پرداخت‌های خیلی خرد توسط طلبکار
+const WAIVES = [[0, 'هیچ‌کدوم'], [2000, 'زیر ۲٬۰۰۰ تومان'], [5000, 'زیر ۵٬۰۰۰ تومان'], [10000, 'زیر ۱۰٬۰۰۰ تومان']];
 
 const needPeople = (plan) => `<div class="panel empty">
     <span class="art">${icon('users')}</span>
@@ -404,11 +407,19 @@ function tabSettle(plan, t) {
   $('#tab').innerHTML = `
     ${receiptCard(plan, t)}
     <div class="panel quiet">
-      <div class="field">
-        <label for="roundtol">گرد کردن مبالغ</label>
-        <select id="roundtol">
-          ${TOLS.map(([v, label]) => `<option value="${v}"${(plan.tol || 0) === v ? ' selected' : ''}>${label}</option>`).join('')}
-        </select>
+      <div class="row">
+        <div class="field grow">
+          <label for="roundtol">گرد کردن مبالغ</label>
+          <select id="roundtol">
+            ${TOLS.map(([v, label]) => `<option value="${v}"${(plan.tol || 0) === v ? ' selected' : ''}>${label}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field grow">
+          <label for="waivetol">بخشیدن خرده‌ها</label>
+          <select id="waivetol">
+            ${WAIVES.map(([v, label]) => `<option value="${v}"${(plan.waive || 0) === v ? ' selected' : ''}>${label}</option>`).join('')}
+          </select>
+        </div>
       </div>
       <p class="hint" id="roundhint"></p>
     </div>
@@ -435,7 +446,7 @@ function tabSettle(plan, t) {
   const roundHint = () => {
     const now = t.plan;
     const lines = TOLS.filter(([v]) => v !== (plan.tol || 0)).map(([v, label]) => {
-      const alt = settle(t.bal, { tol: v });
+      const alt = settle(t.bal, { tol: v, waive: plan.waive || 0 });
       return `${label}: ${pays(alt)}${alt.residual >= 1 ? ` · اختلاف تا ${money(alt.residual)} تومان` : ''}`;
     });
     $('#roundhint').innerHTML =
@@ -445,6 +456,10 @@ function tabSettle(plan, t) {
   roundHint();
   $('#roundtol').onchange = (e) => {
     db.update(plan.id, (p) => { p.tol = Number(e.target.value); });
+    route();
+  };
+  $('#waivetol').onchange = (e) => {
+    db.update(plan.id, (p) => { p.waive = Number(e.target.value); });
     route();
   };
 
@@ -461,10 +476,10 @@ function tabSettle(plan, t) {
 }
 
 function receiptCard(plan, t) {
-  const { transfers, singlePayment, residual } = t.plan;
+  const { transfers, singlePayment, residual, waived } = t.plan;
   if (!transfers.length) {
     return `<div class="panel empty"><span class="art">${icon('check')}</span>
-      <h3>همه تسویه‌ان</h3><p class="hint">کسی به کسی بدهکار نیست.</p></div>`;
+      <h3>همه تسویه‌ان</h3><p class="hint">${waived.length ? 'خرده‌های باقی‌مونده بخشیده شدن.' : 'کسی به کسی بدهکار نیست.'}</p></div>`;
   }
   const rows = transfers.map((tr) => {
     const to = person(plan, tr.to);
@@ -482,8 +497,11 @@ function receiptCard(plan, t) {
         ${tr.exact !== tr.amount ? `<p class="hint">مبلغ دقیق: ${money(tr.exact)} تومان</p>` : ''}
       </div>`;
   }).join('');
-  const note = residual >= 1
-    ? `مبالغ گرد شدن؛ بیشترین اختلاف برای یک نفر ${money(residual)} تومانه.`
+  const parts = [];
+  if (transfers.some((x) => x.amount !== x.exact)) parts.push('مبالغ گرد شدن');
+  if (waived.length) parts.push('خرده‌ها بخشیده شدن');
+  const note = parts.length
+    ? `${parts.join(' و ')}؛ بیشترین اختلاف برای یک نفر ${money(residual)} تومانه.`
     : 'مبالغ دقیقن.';
   return `<section class="receipt">
       <div class="receipt-head">
@@ -491,6 +509,10 @@ function receiptCard(plan, t) {
         <span class="eyebrow">${fa(transfers.length)} پرداخت</span>
       </div>
       ${rows}
+      ${waived.length ? `<div class="waived">
+        <p class="eyebrow">بخشیده شد</p>
+        ${waived.map((w) => `<p class="hint">${esc(nameOf(plan, w.to))} از ${money(w.amount)} تومانِ ${esc(nameOf(plan, w.from))} گذشت.</p>`).join('')}
+      </div>` : ''}
       <span class="stamp ${singlePayment ? '' : 'warn'}">${icon(singlePayment ? 'check' : 'info')}${singlePayment ? 'هر نفر فقط یک بار' : 'بعضی‌ها دو بار پرداخت دارن'}</span>
       ${note ? `<p class="hint">${note}</p>` : ''}
     </section>`;
